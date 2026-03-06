@@ -1,0 +1,82 @@
+[
+  {
+    "input": "Посчитай ипотеку на 8 млн под 19%",
+    "expected_route": "mortgage"
+  },
+  {
+    "input": "Какой будет платёж если взять 10 млн на 25 лет",
+    "expected_route": "mortgage"
+  },
+  {
+    "input": "Сколько переплачу по ипотеке 6 млн под 16%",
+    "expected_route": "mortgage"
+  },
+  {
+    "input": "Рассчитай мне кредит 7 млн на 15 лет",
+    "expected_route": "mortgage"
+  },
+  {
+    "input": "Ипотека 15 млн ставка 18.5% на 30 лет первый взнос 20%",
+    "expected_route": "mortgage"
+  },
+  {
+    "input": "Сравни вторичка 9 млн 19% vs первичка 11 млн 16%",
+    "expected_route": "compare"
+  },
+  {
+    "input": "Что выгоднее: первичка или вторичка",
+    "expected_route": "compare"
+  },
+  {
+    "input": "Новостройка за 13 млн или вторичка за 10 - что лучше?",
+    "expected_route": "compare"
+  },
+  {
+    "input": "Первичка дешевле по ставке но дороже по цене, что брать?",
+    "expected_route": "compare"
+  },
+  {
+    "input": "10 млн под 19 или 12 под 16 на 20 лет",
+    "expected_route": "compare"
+  },
+  {
+    "input": "Найди новостройки в Мытищах",
+    "expected_route": "search"
+  },
+  {
+    "input": "Какие цены на квартиры в Москве",
+    "expected_route": "search"
+  },
+  {
+    "input": "Покажи однокомнатные квартиры до 8 млн",
+    "expected_route": "search"
+  },
+  {
+    "input": "Новостройки рядом с метро Выхино",
+    "expected_route": "search"
+  },
+  {
+    "input": "Квартиры в ЖК Символ",
+    "expected_route": "search"
+  },
+  {
+    "input": "Как оформить ипотеку с плохой кредитной историей",
+    "expected_route": "chat"
+  },
+  {
+    "input": "Что такое эскроу счет",
+    "expected_route": "chat"
+  },
+  {
+    "input": "Какие документы нужны для покупки квартиры",
+    "expected_route": "chat"
+  },
+  {
+    "input": "Привет, расскажи что ты умеешь",
+    "expected_route": "chat"
+  },
+  {
+    "input": "Стоит ли сейчас покупать квартиру",
+    "expected_route": "chat"
+  }
+]

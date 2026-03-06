@@ -1,0 +1,44 @@
+# secrets and environment
+.env
+*.pem
+*.key
+
+# runtime data — never commit user data or session state
+checkpoints.db
+checkpoints.db-shm
+checkpoints.db-wal
+user_memory.json
+
+# logs
+*.log
+logs/
+
+# python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# temp files from CSV analysis
+/tmp/*.png
+
+# Large video files
+*.mov
