@@ -8,10 +8,10 @@
 flowchart TD
     subgraph EXT["Внешние системы"]
         direction LR
-        GC["🧠 GigaChat API"]
-        CBR_E["🏦 ЦБ РФ API"]
-        DDG_E["🔍 DuckDuckGo"]
-        DB_E[("🗄️ SQLite WAL")]
+        GC["GigaChat API"]
+        CBR_E["ЦБ РФ API"]
+        DDG_E["DuckDuckGo"]
+        DB_E[("SQLite WAL")]
     end
 
     subgraph AGENT["LangGraph Agent Core"]

@@ -4,17 +4,17 @@
 
 ```mermaid
 flowchart LR
-    USER["👤 Покупатель квартиры\n───────────────\nТелефон / Telegram App\nПланирует покупку недвижимости"]
+    USER["Покупатель квартиры\n───────────────\nТелефон / Telegram App\nПланирует покупку недвижимости"]
 
     subgraph SYSTEM["  FlatAgent  "]
-        FA["🤖 FlatAgent\n───────────────\nAI-агент по недвижимости:\nрасчёт ипотеки · поиск\nсравнение · анализ CSV"]
+        FA["FlatAgent\n───────────────\nAI-агент по недвижимости:\nрасчёт ипотеки · поиск\nсравнение · анализ CSV"]
     end
 
     subgraph EXT["Внешние сервисы"]
-        TG["📱 Telegram\nМессенджер\nWebhook / Polling"]
-        GC["🧠 GigaChat API\nLLM от Сбер\nGIGACHAT_API_B2B"]
-        CBR["🏦 ЦБ РФ API\nКлючевая ставка\nКурсы USD/EUR/CNY"]
-        DDG["🔍 DuckDuckGo\nПоиск объявлений\nбез API-ключа"]
+        TG["Telegram\nМессенджер\nWebhook / Polling"]
+        GC["GigaChat API\nLLM от Сбер\nGIGACHAT_API_B2B"]
+        CBR["ЦБ РФ API\nКлючевая ставка\nКурсы USD/EUR/CNY"]
+        DDG["DuckDuckGo\nПоиск объявлений\nбез API-ключа"]
     end
 
     USER -- "сообщения / CSV" --> TG

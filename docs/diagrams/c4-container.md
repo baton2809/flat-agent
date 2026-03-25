@@ -4,14 +4,14 @@ Frontend / backend, orchestrator, retriever, tool layer, storage, observability.
 
 ```mermaid
 flowchart TD
-    USER["👤 Пользователь\nПокупатель квартиры"]
+    USER["Пользователь\nПокупатель квартиры"]
 
     subgraph EXT_TOP["Внешние сервисы"]
         direction LR
-        TG_API["📱 Telegram Bot API"]
-        GC_API["🧠 GigaChat API\nLLM: routing · generation · extraction"]
-        CBR_API["🏦 ЦБ РФ API\nКлючевая ставка, курсы"]
-        DDG_API["🔍 DuckDuckGo\nПоиск объявлений"]
+        TG_API["Telegram Bot API"]
+        GC_API["GigaChat API\nLLM: routing · generation · extraction"]
+        CBR_API["ЦБ РФ API\nКлючевая ставка, курсы"]
+        DDG_API["DuckDuckGo\nПоиск объявлений"]
     end
 
     subgraph FLAT["FlatAgent"]
