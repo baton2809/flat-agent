@@ -83,71 +83,156 @@ cd eval && python run_eval.py
 
 ---
 
-## Gap Analysis: что нужно добавить
+## Eval система (расширенная)
 
-### [Агентский трек] Missing evals
+### Routing Eval (`eval/run_eval.py`) — реализован
 
-| Eval | Статус | Приоритет | Описание |
-|---|---|---|---|
-| Routing eval | Реализован | — | 20 кейсов, `eval/run_eval.py` |
-| Memory extraction eval | Отсутствует | Высокий | Нет labeled dataset; неизвестно recall LLM extraction |
-| Mortgage calc accuracy | Отсутствует | Высокий | Сравнение с банковскими калькуляторами (цель ≤1%) |
-| Search relevance eval | Отсутствует | Средний | Человеческая оценка топ-5 результатов |
-| Compare quality eval | Отсутствует | Средний | Оценка полноты и корректности сравнения |
-| Chat domain restriction eval | Отсутствует | Средний | Процент off-topic ответов (цель ≤5%) |
-| Fallback rate tracking | Отсутствует | Средний | % активации LLM fallback per day |
-| End-to-end latency per scenario | Отсутствует | Средний | p95/p99 latency для каждого маршрута |
+20 кейсов, цель ≥90%. Запуск: `python eval/run_eval.py`.
 
-### Предложение: Memory Extraction Eval
+### Memory Extraction Eval (`eval/test_memory.json`) — создать
 
-```python
-# eval/test_memory.json (нужно создать):
+```json
 [
   {
-    "message": "Меня зовут Алексей, ищу квартиру в Митино",
-    "expected_facts": ["Пользователя зовут Алексей", "Митино"],
-    "expected_no_fact": false
+    "input": "Меня зовут Алексей",
+    "should_extract": true,
+    "expected_contains": "Алексей",
+    "method": "llm_or_regex"
   },
   {
-    "message": "Посчитай ипотеку 8 млн на 20 лет",
-    "expected_facts": [],
-    "expected_no_fact": true
+    "input": "Мой бюджет 8 млн рублей",
+    "should_extract": true,
+    "expected_contains": "8 млн",
+    "method": "llm_or_regex"
+  },
+  {
+    "input": "У меня жена и двое детей",
+    "should_extract": true,
+    "expected_contains": "семью",
+    "method": "llm_or_regex"
+  },
+  {
+    "input": "Расскажи про ипотеку",
+    "should_extract": false,
+    "expected_contains": null,
+    "method": "none"
+  },
+  {
+    "input": "Какой курс доллара?",
+    "should_extract": false,
+    "expected_contains": null,
+    "method": "none"
   }
 ]
 ```
 
-### Предложение: Mortgage Accuracy Eval
+Метрика: `recall = правильно_извлечено / should_extract_total`. Цель ≥85%.
+Запуск: `python eval/run_memory_eval.py` (скрипт аналогичен `run_eval.py`).
 
-```python
-# eval/test_mortgage.json:
+### Mortgage Accuracy Eval (`eval/test_mortgage.json`) — создать
+
+```json
 [
   {
-    "amount": 8_000_000,
+    "amount": 8000000,
     "annual_rate": 19.0,
     "term_months": 240,
-    "expected_monthly": 153_456.78,  # из Сбербанк калькулятора
+    "expected_monthly": 153456,
+    "source": "Сбербанк калькулятор",
     "tolerance_pct": 1.0
+  },
+  {
+    "amount": 5000000,
+    "annual_rate": 16.0,
+    "term_months": 180,
+    "expected_monthly": 76297,
+    "source": "ВТБ калькулятор",
+    "tolerance_pct": 1.0
+  },
+  {
+    "amount": 3000000,
+    "annual_rate": 0.0,
+    "term_months": 120,
+    "expected_monthly": 25000,
+    "source": "edge case: rate=0",
+    "tolerance_pct": 0.0
   }
 ]
 ```
+
+Метрика: `|actual - expected| / expected * 100 ≤ tolerance_pct`. Цель: все кейсы ≤1%.
+Запуск: `python eval/run_mortgage_eval.py`.
 
 ---
 
-## [Инфраструктурный трек] Что нужно добавить
+## [Инфраструктурный трек] Мониторинг
 
-### Метрики (Prometheus / structured logging)
+### Метрики Prometheus (схема инструментации)
 
-| Метрика | Тип | Описание | Приоритет |
+```python
+from prometheus_client import Counter, Histogram, Gauge
+
+# --- Request metrics ---
+request_total = Counter(
+    "flatagent_request_total",
+    "Total requests processed",
+    labelnames=["route"]           # mortgage | compare | search | chat
+)
+request_duration = Histogram(
+    "flatagent_request_duration_seconds",
+    "End-to-end request latency",
+    labelnames=["route"],
+    buckets=[0.5, 1, 2, 5, 10, 15, 30]
+)
+
+# --- LLM metrics ---
+llm_calls_total = Counter(
+    "flatagent_llm_calls_total",
+    "GigaChat API calls",
+    labelnames=["node", "status"]  # node: router/memory/compare/search/chat; status: ok/error/fallback
+)
+llm_duration = Histogram(
+    "flatagent_llm_duration_seconds",
+    "GigaChat call latency",
+    labelnames=["node"],
+    buckets=[0.5, 1, 2, 5, 10, 30]
+)
+
+# --- External API ---
+external_errors = Counter(
+    "flatagent_external_api_errors_total",
+    "External API failures",
+    labelnames=["service"]         # gigachat | cbr | duckduckgo
+)
+circuit_breaker_state = Gauge(
+    "flatagent_circuit_breaker_open",
+    "Circuit breaker state (1=open)",
+    labelnames=["service"]
+)
+
+# --- Infrastructure ---
+fallback_total = Counter(
+    "flatagent_fallback_total",
+    "Fallback activations",
+    labelnames=["type"]            # llm_keyword | regex_memory | template_compare | template_search
+)
+db_size_bytes = Gauge("flatagent_db_size_bytes", "checkpoints.db size")
+memory_facts_total = Gauge("flatagent_memory_facts_total", "Total facts in user_memory")
+rate_limit_hits = Counter("flatagent_rate_limit_hits_total", "Rate limit rejections", labelnames=["channel"])
+```
+
+**Endpoint:** `GET /metrics` (prometheus_client `make_asgi_app()`)
+
+| Метрика | Тип | Labelnames | Цель |
 |---|---|---|---|
-| `flatagent_request_total{route}` | Counter | Кол-во запросов per route | Высокий |
-| `flatagent_request_duration_seconds{route}` | Histogram | Latency per route | Высокий |
-| `flatagent_llm_calls_total{node, status}` | Counter | LLM вызовы: success/error/fallback | Высокий |
-| `flatagent_llm_duration_seconds{node}` | Histogram | Latency GigaChat calls | Высокий |
-| `flatagent_external_api_errors_total{service}` | Counter | Ошибки CBR/DDG | Высокий |
-| `flatagent_fallback_total{type}` | Counter | LLM fallback, regex fallback | Средний |
-| `flatagent_db_size_bytes` | Gauge | Размер checkpoints.db | Средний |
-| `flatagent_memory_facts_total` | Gauge | Кол-во фактов в user_memory | Средний |
-| `flatagent_cbr_cache_hits_total` | Counter | TTL-кэш hit/miss | Низкий |
+| `flatagent_request_total` | Counter | route | — |
+| `flatagent_request_duration_seconds` | Histogram | route | p95 ≤15с |
+| `flatagent_llm_calls_total` | Counter | node, status | error < 50% |
+| `flatagent_llm_duration_seconds` | Histogram | node | p95 ≤10с |
+| `flatagent_external_api_errors_total` | Counter | service | <10/мин |
+| `flatagent_circuit_breaker_open` | Gauge | service | 0 в норме |
+| `flatagent_fallback_total` | Counter | type | llm < 20% |
+| `flatagent_db_size_bytes` | Gauge | — | <500 MB |
 
 ### Alerting (рекомендуемые пороги)
 
@@ -159,46 +244,108 @@ cd eval && python run_eval.py
 | БД большой размер | `db_size_bytes` > 500 MB | Warning |
 | Высокий fallback rate | `fallback_total{type=llm}` > 20% за 10 мин | Warning |
 
-### Health Check улучшение
+### Health Check (решение)
 
-**Сейчас:**
-```json
-GET /api/v1/health → {"status": "ok", "agent": "FlatAgent"}
+**Реализация:**
+
+```python
+@app.get("/api/v1/health")
+async def health():
+    import os, time
+    components = {}
+
+    # SQLite
+    try:
+        db_path = str(settings.db_path)
+        size_mb = os.path.getsize(db_path) / 1024 / 1024
+        components["sqlite"] = {"status": "ok", "size_mb": round(size_mb, 1)}
+        if size_mb > 100:
+            components["sqlite"]["status"] = "warning"
+    except Exception as e:
+        components["sqlite"] = {"status": "error", "detail": str(e)}
+
+    # GigaChat (circuit breaker state — без реального вызова)
+    cb_open = _gigachat_cb.is_open()
+    components["gigachat"] = {
+        "status": "error" if cb_open else "ok",
+        "circuit_breaker": "open" if cb_open else "closed"
+    }
+
+    # CBR cache
+    if _rate_cache:
+        age_s = time.monotonic() - _rate_cache[1]
+        components["cbr_cache"] = {
+            "status": "stale" if age_s > 3600 else "fresh",
+            "age_seconds": int(age_s)
+        }
+    else:
+        components["cbr_cache"] = {"status": "empty"}
+
+    overall = "ok"
+    if any(c.get("status") == "error" for c in components.values()):
+        overall = "degraded"
+
+    return {"status": overall, "components": components, "uptime_seconds": int(time.monotonic())}
 ```
 
-**Нужно:**
+**Пример ответа:**
 ```json
-GET /api/v1/health → {
-    "status": "ok|degraded|down",
-    "components": {
-        "gigachat": "ok|error",
-        "sqlite": "ok|error",
-        "cbr_cache": "fresh|stale|error"
-    },
-    "uptime_seconds": 3600
+{
+  "status": "ok",
+  "components": {
+    "sqlite": {"status": "ok", "size_mb": 12.4},
+    "gigachat": {"status": "ok", "circuit_breaker": "closed"},
+    "cbr_cache": {"status": "fresh", "age_seconds": 823}
+  },
+  "uptime_seconds": 14400
 }
 ```
 
-### Structured Logging (предложение)
+### Structured Logging (решение)
 
-```python
-import structlog
-
-logger = structlog.get_logger()
-
-# Вместо:
-logger.info("routing to: %s_node", route)
-
-# Нужно:
-logger.info("routing_decision",
-    route=route,
-    user_id=user_id,
-    method="fast_path|llm",
-    latency_ms=latency
-)
+**Текущий формат (plain text):**
+```
+2024-01-15 10:23:45 - agent.router - INFO - routing to: mortgage_node
 ```
 
-Это позволит парсить логи в ELK/Loki без regex.
+**Целевой формат (JSON, парсится ELK/Loki без regex):**
+```json
+{
+  "timestamp": "2024-01-15T10:23:45.123Z",
+  "level": "INFO",
+  "logger": "agent.router",
+  "event": "routing_decision",
+  "route": "mortgage",
+  "user_id": "123456",
+  "method": "llm_path",
+  "latency_ms": 342,
+  "request_id": "req-abc123"
+}
+```
+
+**Реализация через `python-json-logger`:**
+
+```python
+from pythonjsonlogger import jsonlogger
+
+handler = logging.FileHandler("logs/flat_agent.log")
+handler.setFormatter(jsonlogger.JsonFormatter(
+    "%(timestamp)s %(level)s %(name)s %(message)s"
+))
+logging.getLogger().addHandler(handler)
+```
+
+Поля, которые должны быть в каждом event:
+
+| Поле | Тип | Всегда | Описание |
+|---|---|---|---|
+| `event` | str | Да | Машинный идентификатор события |
+| `user_id` | str | Да | Telegram ID (не имя) |
+| `request_id` | str | Да | UUID per request для correlation |
+| `route` | str | Нет | routing decision |
+| `node` | str | Нет | LangGraph node name |
+| `latency_ms` | int | Нет | Время выполнения шага |
+| `status` | str | Нет | ok/error/fallback |
 
 ### Distributed Tracing (будущее)
 

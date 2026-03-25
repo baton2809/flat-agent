@@ -185,15 +185,138 @@ except Exception as markdown_error:
 | Telegram Markdown fallback | Реализовано |
 | Polling fallback для dev | Реализовано |
 
-### Gaps (требуют доработки)
+### Rate Limiting (решение)
 
-| Gap | Приоритет | Описание |
-|---|---|---|
-| Rate limiting middleware | Высокий | 30 req/min на IP для `/api/v1/chat` |
-| Telegram rate limit per user | Высокий | 20 msg/min на user_id |
-| Webhook secret validation | Высокий | Валидация `X-Telegram-Bot-Api-Secret-Token` header не реализована полностью |
-| API authentication | Высокий | `/api/v1/chat` открыт без auth (любой может вызвать) |
-| Graceful shutdown | Средний | Нет `app.state.graph` cleanup при остановке |
-| Health check GigaChat | Средний | `/health` не проверяет доступность GigaChat |
-| Thread pool size | Средний | `run_in_executor(None, ...)` — default pool, нет limits |
-| Process restart policy | Низкий | Нет supervisor (systemd/pm2) в PoC |
+**FastAPI Middleware** (`main.py`):
+
+```python
+from collections import defaultdict, deque
+import time
+
+class RateLimitMiddleware:
+    """In-memory rate limiter. Достаточно для single-process PoC."""
+    def __init__(self, app, max_requests: int = 30, window_sec: int = 60):
+        self.app = app
+        self.max_req = max_requests
+        self.window = window_sec
+        self._buckets: dict[str, deque] = defaultdict(deque)
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["path"] == "/api/v1/chat":
+            client_ip = (scope.get("client") or ["unknown"])[0]
+            now = time.monotonic()
+            bucket = self._buckets[client_ip]
+            while bucket and bucket[0] < now - self.window:
+                bucket.popleft()
+            if len(bucket) >= self.max_req:
+                response = Response("Too Many Requests", status_code=429)
+                await response(scope, receive, send)
+                return
+            bucket.append(now)
+        await self.app(scope, receive, send)
+
+app.add_middleware(RateLimitMiddleware, max_requests=30, window_sec=60)
+```
+
+**Telegram throttling** (`telegram_bot/bot.py`):
+
+```python
+_tg_buckets: dict[int, deque] = defaultdict(deque)
+
+async def _check_telegram_rate(user_id: int, update: Update) -> bool:
+    now = time.monotonic()
+    bucket = _tg_buckets[user_id]
+    while bucket and bucket[0] < now - 60:
+        bucket.popleft()
+    if len(bucket) >= 20:
+        await update.message.reply_text("Слишком много запросов. Подождите минуту.")
+        return False
+    bucket.append(now)
+    return True
+```
+
+### Webhook Secret Validation (решение)
+
+```python
+import hmac
+
+@app.post("/webhook/telegram")
+async def telegram_webhook(request: Request):
+    secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    expected = settings.telegram_webhook_secret
+    # hmac.compare_digest защищает от timing attack
+    if expected and not hmac.compare_digest(secret.encode(), expected.encode()):
+        logger.warning("Webhook secret mismatch from %s", request.client.host)
+        raise HTTPException(status_code=403, detail="Forbidden")
+    data = await request.json()
+    update = Update.de_json(data, application.bot)
+    await application.update_queue.put(update)
+    return {"ok": True}
+```
+
+TELEGRAM_WEBHOOK_SECRET задаётся при регистрации webhook:
+```python
+await bot.set_webhook(url=webhook_url, secret_token=settings.telegram_webhook_secret)
+```
+
+### API Auth для /api/v1/chat (решение)
+
+```python
+from fastapi.security import APIKeyHeader
+import hmac
+
+api_key_scheme = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+async def require_api_key(key: str | None = Depends(api_key_scheme)):
+    expected = settings.api_key  # из .env: API_KEY=random_32chars
+    if not expected:
+        return  # если не задан — dev режим без auth
+    if not key or not hmac.compare_digest(key, expected):
+        raise HTTPException(status_code=403, detail="Invalid API key")
+
+@app.post("/api/v1/chat", dependencies=[Depends(require_api_key)])
+async def chat_endpoint(...):
+    ...
+```
+
+`API_KEY` добавляется в `.env` и `.env.example`.
+
+### Thread Pool Size (решение)
+
+```python
+import concurrent.futures
+
+# В lifespan: создаём ограниченный пул
+executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=10,         # ~10 concurrent users для single VPS
+    thread_name_prefix="agent-worker"
+)
+app.state.executor = executor
+
+# В chat endpoint:
+result = await loop.run_in_executor(
+    app.state.executor,     # вместо None (default unbounded pool)
+    lambda: agent_graph.invoke(input_state, config)
+)
+
+# В shutdown:
+app.state.executor.shutdown(wait=True, cancel_futures=False)
+```
+
+### Graceful Shutdown (решение)
+
+```python
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # startup
+    app.state.graph = build_graph(str(settings.db_path))
+    app.state.executor = ThreadPoolExecutor(max_workers=10)
+    yield
+    # shutdown — uvicorn --timeout-graceful-shutdown 30 ждёт in-flight запросы
+    app.state.executor.shutdown(wait=True, cancel_futures=False)
+    conn = getattr(app.state.graph.checkpointer, "conn", None)
+    if conn:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.close()
+    logger.info("FlatAgent graceful shutdown complete")
+```

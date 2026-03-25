@@ -278,6 +278,85 @@ CSV-анализ (отдельный путь, документ из Telegram):
 
 ---
 
+## 7.7 Retry логика для LLM (tenacity)
+
+**Решение:** `tenacity` с exponential backoff для всех GigaChat-вызовов.
+
+```python
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type((ConnectionError, TimeoutError)),
+    reraise=False,          # после 3 попыток → fallback, не исключение
+)
+def _call_gigachat_with_retry(messages, temperature):
+    return _gigachat_client.chat(messages, temperature=temperature)
+```
+
+| Параметр | Значение | Обоснование |
+|---|---|---|
+| Попытки | 3 | Баланс: не блокируем надолго, но даём шанс восстановиться |
+| Backoff | 2–10 сек, exponential | Не перегружаем API при временном сбое |
+| retry_if | ConnectionError, TimeoutError | Только сетевые ошибки; логические ошибки не ретраим |
+| После 3 попыток | → `_generate_fallback()` | Бот работает даже если GigaChat недоступен |
+
+---
+
+## 7.8 Circuit Breaker для внешних API
+
+**Проблема:** при деградации DDG или GigaChat каждый запрос ждёт полный timeout (30 сек). При 10 одновременных пользователях — блокировка всего процесса.
+
+**Решение:** простой in-process circuit breaker на основе счётчика ошибок.
+
+```python
+from collections import deque
+import time
+
+class CircuitBreaker:
+    """open/half-open/closed state machine."""
+    def __init__(self, failure_threshold=5, window_sec=60, recovery_sec=30):
+        self.failures = deque()      # timestamps ошибок в окне
+        self.threshold = failure_threshold
+        self.window = window_sec
+        self.recovery = recovery_sec
+        self.opened_at = None
+        self.state = "closed"        # closed → open → half-open → closed
+
+    def record_failure(self):
+        now = time.monotonic()
+        self.failures.append(now)
+        # убираем старые ошибки за пределами окна
+        while self.failures and self.failures[0] < now - self.window:
+            self.failures.popleft()
+        if len(self.failures) >= self.threshold:
+            self.state = "open"
+            self.opened_at = now
+
+    def is_open(self):
+        if self.state == "open":
+            if time.monotonic() - self.opened_at > self.recovery:
+                self.state = "half-open"
+                return False         # один пробный запрос
+            return True
+        return False
+
+    def record_success(self):
+        self.failures.clear()
+        self.state = "closed"
+```
+
+| Сервис | threshold | window | recovery | Fallback при open |
+|---|---|---|---|---|
+| GigaChat | 5 ошибок | 60 сек | 30 сек | `_generate_fallback()` (keyword) |
+| DDG | 3 ошибки | 60 сек | 60 сек | "Поиск временно недоступен" |
+| ЦБ РФ | 3 ошибки | 300 сек | 120 сек | TTL-кэш; если кэш пуст → user message |
+
+**Инстанцирование:** module-level singleton (один `CircuitBreaker` на процесс на сервис).
+
+---
+
 ## 8. [Инфраструктурный трек] Надёжность и мониторинг
 
 ### 8.1 Защиты при недоступности внешних API
@@ -331,27 +410,139 @@ SQLite недоступен:
 
 **Что НЕ логируется:** полные ответы GigaChat, содержимое `user_memory`, credentials и токены.
 
-### 8.4 Gap Analysis — что нужно добавить
+### 8.4 Rate Limiting
 
-**Агентский трек:**
-| Gap | Приоритет |
-|---|---|
-| Eval для memory extraction (нет labeled dataset) | Высокий |
-| Eval для compare/chat/search nodes | Средний |
-| Explicit sliding window в mortgage/compare nodes (сейчас только в chat) | Средний |
-| Retry logic для GigaChat (exponential backoff, 3 попытки) | Высокий |
-| Second LLM fallback (если GigaChat полностью down) | Средний |
+**Проблема:** один пользователь может исчерпать GigaChat-бюджет (~2000 руб/мес) через flood.
 
-**Инфраструктурный трек:**
-| Gap | Приоритет |
-|---|---|
-| Rate limiting middleware (FastAPI) — 30 req/min на IP | Высокий |
-| Rate limiting Telegram — 20 msg/min на user_id | Высокий |
-| Telegram webhook secret validation (`X-Telegram-Bot-Api-Secret-Token`) | Высокий |
-| Prometheus metrics / structured logging (latency per node, error rate) | Средний |
-| Health check для GigaChat в `/api/v1/health` | Средний |
-| SQLite мониторинг (размер БД, количество checkpoints) | Средний |
-| Graceful shutdown (дожать текущие запросы перед остановкой) | Низкий |
+**Решение: FastAPI middleware** (in-memory, без Redis, достаточно для PoC):
+
+```python
+from collections import defaultdict, deque
+import time
+
+class RateLimitMiddleware:
+    def __init__(self, app, max_requests: int = 30, window_sec: int = 60):
+        self.app = app
+        self.max_req = max_requests
+        self.window = window_sec
+        self._counters: dict[str, deque] = defaultdict(deque)
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["path"] == "/api/v1/chat":
+            ip = scope["client"][0]
+            now = time.monotonic()
+            q = self._counters[ip]
+            while q and q[0] < now - self.window:
+                q.popleft()
+            if len(q) >= self.max_req:
+                # 429 Too Many Requests
+                await send({"type": "http.response.start", "status": 429, ...})
+                return
+            q.append(now)
+        await self.app(scope, receive, send)
+```
+
+**Telegram throttling** (в `bot.py`):
+
+```python
+_tg_counters: dict[int, deque] = defaultdict(deque)
+TG_MAX_MSG = 20  # сообщений
+TG_WINDOW = 60   # секунд
+
+def _is_rate_limited(user_id: int) -> bool:
+    now = time.monotonic()
+    q = _tg_counters[user_id]
+    while q and q[0] < now - TG_WINDOW:
+        q.popleft()
+    if len(q) >= TG_MAX_MSG:
+        return True
+    q.append(now)
+    return False
+```
+
+| Лимит | Значение | Где |
+|---|---|---|
+| FastAPI `/api/v1/chat` | 30 req/60 сек на IP | `RateLimitMiddleware` |
+| Telegram | 20 msg/60 сек на user_id | `bot.py` handler |
+| Ответ при превышении | 429 / "Слишком много запросов, подождите минуту" | HTTP / Telegram |
+
+### 8.5 Telegram Webhook Secret Validation
+
+**Проблема:** без проверки X-Telegram-Bot-Api-Secret-Token любой может слать боту фейковые сообщения.
+
+**Sequence:**
+
+```
+Telegram → POST /webhook/telegram
+           Headers: X-Telegram-Bot-Api-Secret-Token: <SECRET>
+                │
+                ▼
+        main.py: @app.post("/webhook/telegram")
+                │
+                ├─ secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+                ├─ expected = settings.TELEGRAM_WEBHOOK_SECRET
+                ├─ if not hmac.compare_digest(secret, expected):
+                │      raise HTTPException(403, "Forbidden")
+                │
+                └─ application.update_queue.put_nowait(Update(...))
+```
+
+```python
+import hmac
+
+@app.post("/webhook/telegram")
+async def telegram_webhook(request: Request):
+    secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if not hmac.compare_digest(secret, settings.TELEGRAM_WEBHOOK_SECRET):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    data = await request.json()
+    update = Update.de_json(data, application.bot)
+    await application.update_queue.put(update)
+    return {"ok": True}
+```
+
+**`hmac.compare_digest`** — защита от timing attack (не простое `==`).
+
+### 8.6 Auth для /api/v1/chat
+
+**Проблема:** открытый endpoint — любой может вызвать и потратить GigaChat-бюджет.
+
+**Решение: API Key через заголовок** (минимально достаточно для PoC):
+
+```python
+from fastapi.security import APIKeyHeader
+
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=True)
+
+async def verify_api_key(key: str = Depends(api_key_header)):
+    if not hmac.compare_digest(key, settings.API_KEY):
+        raise HTTPException(403, "Invalid API key")
+    return key
+
+@app.post("/api/v1/chat", dependencies=[Depends(verify_api_key)])
+async def chat(...):
+    ...
+```
+
+`API_KEY` хранится в `.env`, длина ≥32 символа.
+
+### 8.7 Graceful Shutdown
+
+```python
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # startup
+    yield
+    # shutdown — дожимаем текущие запросы
+    if hasattr(app.state, "graph"):
+        # закрываем SQLite соединения
+        app.state.graph.checkpointer.conn.close()
+    if hasattr(app.state, "application"):
+        await app.state.application.stop()
+    logger.info("Shutdown complete")
+```
+
+FastAPI lifespan автоматически дожидается завершения активных запросов перед вызовом shutdown-блока (при использовании `uvicorn --timeout-graceful-shutdown 30`).
 
 ---
 

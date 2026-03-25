@@ -106,11 +106,58 @@ Regex extraction (имя, бюджет, семья, работа)
 | Eval coverage | `eval/run_eval.py` — 20 labeled cases, цель ≥90% |
 | Context-aware routing | `_is_mortgage_followup()` проверяет AI-контекст |
 
-### Gaps (требуют доработки)
+### Retry / Fallback для роутера (решение)
 
-- [ ] Retry с exponential backoff для GigaChat в роутере (сейчас нет retry)
-- [ ] `enhanced_router.py` — есть в `__pycache__` ветки, не в `main`; нужно решить: удалить или включить
-- [ ] Eval для memory extraction (нет labeled dataset)
+**Паттерн: tenacity с exponential backoff**
+
+```python
+from tenacity import (
+    retry, stop_after_attempt, wait_exponential,
+    retry_if_exception_type, after_log
+)
+import logging
+
+logger = logging.getLogger(__name__)
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type((ConnectionError, TimeoutError, OSError)),
+    after=after_log(logger, logging.WARNING),
+    reraise=False,
+)
+def _call_router_llm(messages: list) -> RouteDecision | None:
+    """Возвращает RouteDecision или None после 3 неудачных попыток."""
+    return llm_call_with_functions(messages, temperature=0.0)
+```
+
+**Fallback chain после исчерпания попыток:**
+```
+attempt 1 → ConnectionError → wait 2s
+attempt 2 → ConnectionError → wait 4s
+attempt 3 → ConnectionError → reraise=False → return None
+    ↓
+route = "chat"  ← всегда безопасный дефолт
+```
+
+`enhanced_router.py` из `__pycache__` — **удалить**. Функциональность покрыта текущим `router.py` + tenacity.
+
+### Eval для memory extraction (план)
+
+Нет labeled dataset — качество неизмеримо. **Минимальный план:**
+
+```json
+// eval/test_memory.json  (5 кейсов, достаточно для старта)
+[
+  {"input": "Меня зовут Алексей", "expected_fact": "Пользователя зовут Алексей", "should_extract": true},
+  {"input": "Мой бюджет 8 млн", "expected_fact": "Бюджет пользователя: 8 млн", "should_extract": true},
+  {"input": "Расскажи про ипотеку", "expected_fact": null, "should_extract": false},
+  {"input": "У меня жена и двое детей", "expected_fact": "Пользователь упомянул семью", "should_extract": true},
+  {"input": "Какой курс доллара?", "expected_fact": null, "should_extract": false}
+]
+```
+
+Метрика: `recall = extracted_correctly / should_extract_total`. Цель ≥85%.
 
 ---
 
@@ -124,8 +171,43 @@ Regex extraction (имя, бюджет, семья, работа)
 | Checkpoint cleanup | `keep_per_thread=5` + `VACUUM` + `WAL checkpoint TRUNCATE` |
 | Одновременные запросы | LangGraph `thread_id` изолирует контекст per user |
 
-### Gaps (требуют доработки)
+### Graceful Shutdown (решение)
 
-- [ ] Graceful shutdown: дожать текущие `invoke()` перед остановкой процесса
-- [ ] SQLite мониторинг: размер файла, количество checkpoints — нет алертов
-- [ ] Connection pool для высокой нагрузки (>10 concurrent users)
+```python
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # --- startup ---
+    app.state.graph = build_graph()
+    yield
+    # --- shutdown ---
+    # LangGraph не имеет async close; закрываем SQLite соединение явно
+    conn = app.state.graph.checkpointer.conn
+    if conn:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.close()
+    logger.info("Graph checkpointer closed, shutdown complete")
+```
+
+Uvicorn: `--timeout-graceful-shutdown 30` — ждёт завершения активных запросов.
+
+### SQLite мониторинг (решение)
+
+```python
+import os
+
+def get_db_stats(db_path: str) -> dict:
+    size_mb = os.path.getsize(db_path) / 1024 / 1024
+    with sqlite3.connect(db_path) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM checkpoints"
+        ).fetchone()[0]
+    if size_mb > 100:
+        logger.critical("DB size exceeded 100MB: %.1fMB", size_mb)
+    elif size_mb > 50:
+        logger.warning("DB size warning: %.1fMB", size_mb)
+    return {"size_mb": round(size_mb, 2), "checkpoint_count": count}
+```
+
+Вызов: при `/api/v1/health` + при каждом `cleanup_old_checkpoints()`.
+
+**Алерт-пороги:** >50 MB = WARNING, >100 MB = CRITICAL → в `/health` ответ.

@@ -55,11 +55,21 @@ user_id: str # Telegram chat_id
 | Компонент | Размер | Ограничение |
 |---|---|---|
 | GigaChat Pro контекст | 32K токенов | Hard limit API |
-| chat_node sliding window | messages[-10:] | Soft limit в коде |
-| mortgage/compare nodes | Весь messages | Нет explicit sliding window |
+| chat_node sliding window | messages[-10:] | Реализовано |
+| mortgage_node sliding window | messages[-10:] | **Добавить** — сейчас полная история |
+| compare_node sliding window | messages[-10:] | **Добавить** — сейчас полная история |
 | max_tokens per LLM call | 1024 | `_MAX_TOKENS` в direct_llm_call.py |
 
-**Gap:** sliding window реализован только в chat_node. Mortgage и compare передают полную историю.
+**Решение для mortgage/compare:** применить тот же паттерн что в chat_node:
+
+```python
+# В mortgage_node и compare_node (единый хелпер):
+def _get_context_messages(state: AgentState, window: int = 10) -> list:
+    """Последние N сообщений для передачи в LLM."""
+    return list(state["messages"])[-window:]
+```
+
+Это гарантирует, что ни один node не передаёт в LLM больше 10 сообщений истории.
 
 ### Cleanup policy
 
@@ -72,7 +82,37 @@ cleanup_old_checkpoints(keep_per_thread: int = 5):
     VACUUM
 ```
 
-- Вызов: вручную или при старте приложения (нет scheduled trigger — Gap)
+- Вызов: при старте приложения + **scheduled trigger каждые 24 часа**
+
+**Scheduled cleanup (решение):**
+
+```python
+import asyncio
+
+async def scheduled_cleanup(graph, interval_hours: int = 24):
+    """Фоновая задача: cleanup + мониторинг размера БД."""
+    while True:
+        await asyncio.sleep(interval_hours * 3600)
+        try:
+            cleanup_old_checkpoints(keep_per_thread=5)
+            stats = get_db_stats(settings.DB_PATH)
+            logger.info("Scheduled cleanup done: %s", stats)
+            # Алерт если БД большая
+            if stats["size_mb"] > 50:
+                logger.warning("DB size alert: %.1fMB", stats["size_mb"])
+        except Exception:
+            logger.exception("Scheduled cleanup failed")
+
+# В lifespan:
+asyncio.create_task(scheduled_cleanup(app.state.graph))
+```
+
+**Алерт-пороги:**
+| Размер `checkpoints.db` | Действие |
+|---|---|
+| < 50 MB | OK |
+| 50–100 MB | WARNING в логах |
+| > 100 MB | CRITICAL + `/health` возвращает `"db_status": "critical"` |
 
 ---
 
@@ -185,7 +225,20 @@ get_settings = lru_cache(maxsize=1)(Settings)
 | Name resolution accuracy | — | 4 regex паттерна, нет eval |
 | Факты не перезаписываются | — | `INSERT OR IGNORE` |
 
-**Gap (высокий приоритет):** Нет eval-набора для memory extraction. Неизвестно, насколько хорошо LLM извлекает факты на практике.
+**Eval план (решение):** `eval/test_memory.json` — 5 размеченных кейсов:
+
+```json
+[
+  {"input": "Меня зовут Алексей", "should_extract": true, "expected_contains": "Алексей"},
+  {"input": "Мой бюджет 8 млн рублей", "should_extract": true, "expected_contains": "8 млн"},
+  {"input": "У меня жена и двое детей", "should_extract": true, "expected_contains": "семью"},
+  {"input": "Расскажи про ипотеку", "should_extract": false, "expected_contains": null},
+  {"input": "Какой курс доллара?", "should_extract": false, "expected_contains": null}
+]
+```
+
+Метрика: `recall = правильно_извлечено / всего_должны_извлечься`. Цель ≥85%.
+Запуск: `python eval/run_memory_eval.py` (аналог `run_eval.py` для роутинга).
 
 ---
 
@@ -199,4 +252,15 @@ get_settings = lru_cache(maxsize=1)(Settings)
 | VACUUM после cleanup | Предотвращает рост файла БД |
 | Мониторинг размера БД | Нет (Gap) |
 
-**Gap:** Нет мониторинга размера `checkpoints.db`. При интенсивном использовании без периодического cleanup БД может разрастись. Нужен scheduled cleanup + alert при размере > N MB.
+**Мониторинг размера БД (решение):**
+
+```python
+def get_db_stats(db_path: str) -> dict:
+    size_mb = os.path.getsize(db_path) / 1024 / 1024
+    with sqlite3.connect(db_path) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0]
+    return {"size_mb": round(size_mb, 2), "checkpoint_count": count}
+```
+
+Вызывается в `/api/v1/health`. Пороги: >50MB = WARNING, >100MB = CRITICAL.
+Scheduled cleanup каждые 24ч (см. секцию Cleanup policy выше).

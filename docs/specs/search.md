@@ -173,17 +173,66 @@ Telegram: reply_text (аналитика) + reply_photo (график)
 | Prompt constraints | Запрет Markdown, требование конкретных объектов | Консистентное форматирование |
 | Fallback при пустом LLM | Шаблонный список + ссылки | Всегда полезный ответ |
 
-**Gap:** Нет метрики релевантности результатов (нужен human eval или offline labeled set).
+**Eval план (решение):** `eval/test_search.json` — 5 кейсов для spot-check релевантности:
+
+```json
+[
+  {"query": "купить квартиру в Москве", "expected_sources_min": 1, "expected_re_terms_min": 2},
+  {"query": "новостройки в Мытищах", "expected_sources_min": 1, "expected_re_terms_min": 2},
+  {"query": "ЖК Символ цена", "expected_sources_min": 1, "expected_re_terms_min": 2},
+  {"query": "жилищный кодекс статья 51", "expected_sources_min": 0, "expected_spam_blocked": true},
+  {"query": "вторичное жильё в Подмосковье", "expected_sources_min": 1, "expected_re_terms_min": 2}
+]
+```
+
+Метрика: % запросов где топ-5 результатов содержат ≥2 real-estate термина. Цель ≥80%.
 
 ---
 
 ## [Инфраструктурный трек] Надёжность поиска
 
-| Параметр | Текущее | Нужно |
-|---|---|---|
-| DDG timeout | Библиотечный default | Явный timeout 10-15 сек |
-| Rate limit DDG | Не реализован | 10 запросов/мин на user_id |
-| Retry стратегия | 1 retry с timelimit="y" | Exponential backoff |
-| Circuit breaker | Нет | Открыть при >5 ошибок/мин |
-| Fallback при DDG down | ExternalAPIError → user message | OK, но нет cached results |
-| Monitoring | Нет | `search_requests_total`, `search_errors_total`, `search_latency_seconds` |
+### DDG Timeout (решение)
+
+```python
+# search_tool.py — явный timeout вместо библиотечного default
+def _ddg_search(query: str, max_results: int = 12, timelimit=None) -> list:
+    try:
+        with DDGS(timeout=12) as ddgs:   # явный 12 сек
+            results = list(ddgs.text(
+                query,
+                region="ru-ru",
+                safesearch="moderate",
+                max_results=max_results,
+                timelimit=timelimit,
+            ))
+        return results
+    except Exception as e:
+        raise ExternalAPIError(f"DDG search failed: {e}") from e
+```
+
+### Circuit Breaker для DDG (решение)
+
+```python
+# Singleton circuit breaker (module-level)
+_ddg_cb = CircuitBreaker(failure_threshold=3, window_sec=60, recovery_sec=60)
+
+def _ddg_search_safe(query: str, max_results: int = 12) -> list:
+    if _ddg_cb.is_open():
+        logger.warning("DDG circuit breaker OPEN — skipping search")
+        raise ExternalAPIError("DDG circuit breaker open")
+    try:
+        results = _ddg_search(query, max_results)
+        _ddg_cb.record_success()
+        return results
+    except ExternalAPIError:
+        _ddg_cb.record_failure()
+        raise
+```
+
+| Параметр | Значение |
+|---|---|
+| DDG timeout | 12 сек (явный) |
+| Circuit breaker threshold | 3 ошибки за 60 сек → open |
+| Recovery period | 60 сек → half-open → 1 пробный запрос |
+| При open | Немедленно `ExternalAPIError` — не ждём timeout |
+| Мониторинг | `search_requests_total`, `search_errors_total`, `ddg_cb_state{state}` |

@@ -63,7 +63,26 @@ chat_node: user_message_for_error(ExternalAPIError)
          → "Не удалось получить актуальные данные. Попробуйте позже."
 ```
 
-**Gap:** Нет fallback на кэш при ExternalAPIError в `get_current_rate()` — нужно возвращать последнее известное значение с пометкой о давности.
+**Fallback на stale кэш (решение):**
+
+```python
+def get_current_rate() -> str:
+    now = time.monotonic()
+    # Свежий кэш
+    if _rate_cache and (now - _rate_cache[1]) < _RATE_CACHE_TTL:
+        return _rate_cache[0]
+    try:
+        result = _fetch_current_rate_from_cbr()
+        _rate_cache = (result, now)
+        return result
+    except Exception as e:
+        # Stale fallback: возвращаем устаревший кэш с пометкой
+        if _rate_cache:
+            age_h = (now - _rate_cache[1]) / 3600
+            logger.warning("CBR unavailable, returning stale rate (%.1fh old)", age_h)
+            return f"{_rate_cache[0]} *(данные могут быть устаревшими)*"
+        raise ExternalAPIError("CBR API недоступен") from e
+```
 
 ---
 
@@ -102,6 +121,18 @@ monthly_payment = amount * r * (1 + r)^n / ((1 + r)^n - 1)
 - **Детерминированная математика** — LLM не участвует
 - Расхождение с банковским калькулятором ≤1% (цель PoC достигнута)
 - `raises: ValueError` → `ValidationError` → `node_error_response` → user message
+
+**Верхние пределы (решение):**
+
+```python
+MAX_MORTGAGE_AMOUNT = 100_000_000   # 100 млн руб — разумный upper bound PoC
+MAX_MORTGAGE_TERM_MONTHS = 360      # 30 лет
+
+if amount > MAX_MORTGAGE_AMOUNT:
+    raise ValidationError(f"Сумма не может превышать {MAX_MORTGAGE_AMOUNT/1e6:.0f} млн руб")
+if term_months > MAX_MORTGAGE_TERM_MONTHS:
+    raise ValidationError(f"Срок не может превышать {MAX_MORTGAGE_TERM_MONTHS//12} лет")
+```
 
 ---
 
@@ -204,8 +235,18 @@ Fallback: шаблонный нумерованный список если LLM 
 | Параметр | Значение |
 |---|---|
 | Макс. размер CSV | Telegram file limit = 20 MB |
+| Макс. строк CSV | **10 000 строк** (иначе OLS + Plotly слишком медленно) |
 | Поддерживаемые форматы | CSV (только) |
 | Нестандартные колонки | LLM-guided маппинг; при неудаче — сообщение об ошибке |
+
+**Проверка строк (решение):**
+```python
+MAX_CSV_ROWS = 10_000
+
+df = pd.read_csv(path)
+if len(df) > MAX_CSV_ROWS:
+    return {"error": f"Файл содержит {len(df)} строк. Максимум: {MAX_CSV_ROWS}. Загрузите выборку."}
+```
 
 ---
 
@@ -227,4 +268,18 @@ Fallback: шаблонный нумерованный список если LLM 
 | search_tool | Библ. default | 1 (timelimit) | Нет (нужен) |
 | csv_analysis | Нет | Нет | N/A |
 
-**Gap (высокий приоритет):** Нет circuit breaker для GigaChat и ЦБ РФ — при деградации сервиса каждый запрос будет ждать timeout (30 сек), загружая process thread pool.
+**Circuit Breaker (решение):**
+
+```python
+# module-level singletons в соответствующих tool-файлах
+_gigachat_cb = CircuitBreaker(failure_threshold=5, window_sec=60, recovery_sec=30)
+_cbr_cb      = CircuitBreaker(failure_threshold=3, window_sec=300, recovery_sec=120)
+_ddg_cb      = CircuitBreaker(failure_threshold=3, window_sec=60, recovery_sec=60)
+```
+
+| Инструмент | Timeout | Retry | Circuit Breaker | Fallback при open |
+|---|---|---|---|---|
+| cbr_tool | 10 сек | Нет | `_cbr_cb` (3/300s/120s) | Stale кэш → user message |
+| mortgage_calc | N/A | N/A | N/A | ValidationError |
+| search_tool | **12 сек (явный)** | 1 с timelimit="y" | `_ddg_cb` (3/60s/60s) | "Поиск временно недоступен" |
+| GigaChat (везде) | 30 сек | **tenacity ×3** | `_gigachat_cb` (5/60s/30s) | keyword fallback |
