@@ -3,46 +3,48 @@
 Frontend / backend, orchestrator, retriever, tool layer, storage, observability.
 
 ```mermaid
-C4Container
-    title FlatAgent — Container Diagram
+flowchart TD
+    USER["👤 Пользователь\nПокупатель квартиры"]
 
-    Person(user, "Пользователь", "Покупатель квартиры")
+    subgraph EXT_TOP["Внешние сервисы"]
+        direction LR
+        TG_API["📱 Telegram Bot API"]
+        GC_API["🧠 GigaChat API\nLLM: routing · generation · extraction"]
+        CBR_API["🏦 ЦБ РФ API\nКлючевая ставка, курсы"]
+        DDG_API["🔍 DuckDuckGo\nПоиск объявлений"]
+    end
 
-    System_Ext(telegram_api, "Telegram Bot API")
-    System_Ext(gigachat_api, "GigaChat API", "LLM: routing, generation, extraction")
-    System_Ext(cbr_api, "ЦБ РФ API", "Ключевая ставка, курсы валют")
-    System_Ext(ddg_api, "DuckDuckGo", "Поиск объявлений недвижимости")
+    subgraph FLAT["FlatAgent"]
+        direction TB
 
-    System_Boundary(flatagent, "FlatAgent") {
+        FE["Frontend Layer\n─────────────────────\nTelegram Bot + FastAPI\nRate limiting · Webhook HMAC auth · API key"]
 
-        Container(frontend, "Frontend Layer", "Telegram Bot + FastAPI", "Точки входа: Telegram polling/webhook, REST /chat. Rate limiting, webhook secret validation, API key auth.")
+        ORCH["Orchestrator\n─────────────────────\nLangGraph StateGraph\nrouter → memory → nodes → END\nTenacity retry · Circuit breakers · SqliteSaver"]
 
-        Container(orchestrator, "Orchestrator", "LangGraph StateGraph", "Граф: router → memory_extraction → [mortgage|compare|search|chat] → END. Tenacity retry, circuit breakers. SqliteSaver checkpointing.")
+        LLM["LLM Gateway\n─────────────────────\nGigaChat SDK + LangChain\nFunction calling (structured output)\nPlain generation · Keyword fallback"]
 
-        Container(llm_gateway, "LLM Gateway", "GigaChat SDK + LangChain", "Единая точка доступа к GigaChat. Function calling (structured output), plain generation, keyword fallback при недоступности.")
+        TOOLS["Tool Layer\n─────────────────────\ncbr_tool: TTL-кэш 1ч + stale fallback\nmortgage_calc: аннуитетная формула\nsearch_tool: DDG 12s + circuit breaker\ncsv_analysis: OLS + Plotly"]
 
-        Container(tool_layer, "Tool Layer", "Python + httpx + ddgs", "cbr_tool: ЦБ РФ + TTL-кэш + stale fallback\nmortgage_calc: аннуитетная формула\nsearch_tool: DDG + circuit breaker (12s timeout)\ncsv_analysis: OLS + Plotly")
+        DB[("Storage\n─────────────────────\nSQLite WAL\ncheckpoints: история диалога\nuser_memory: факты о пользователе")]
 
-        ContainerDb(storage, "Storage", "SQLite WAL", "checkpoints: история диалога (per user, keep=5)\nuser_memory: факты о пользователе (UNIQUE)")
+        OBS["Observability\n─────────────────────\nJSON-логи INFO/WARN/ERROR\nPrometheus: /metrics\nHealth check: /api/v1/health"]
+    end
 
-        Container(observability, "Observability", "Python logging + Prometheus", "JSON-логи (INFO/WARN/ERROR)\nPrometheus метрики: request_total, llm_calls_total, fallback_total, db_size_bytes\nGET /metrics, GET /api/v1/health (sqlite+gigachat+cbr_cache)")
-    }
+    USER -->|"Telegram сообщения / CSV"| FE
+    USER -->|"HTTPS POST /chat"| FE
 
-    Rel(user, frontend, "Telegram / HTTPS POST /chat", "Telegram / JSON")
-    Rel(frontend, telegram_api, "webhook setup + replies", "HTTPS")
+    FE <-->|"webhook + replies"| TG_API
+    FE -->|"invoke AgentState\nThreadPoolExecutor max=10"| ORCH
 
-    Rel(frontend, orchestrator, "invoke(AgentState, config)", "Python / ThreadPoolExecutor")
+    ORCH -->|"routing + extraction\n+ generation"| LLM
+    ORCH -->|"cbr · calc · search · csv"| TOOLS
+    ORCH <-->|"checkpoints R/W\nuser_memory CRUD"| DB
+    ORCH -->|"structured logs + metrics"| OBS
+    FE -->|"rate limit events\nrequest latency"| OBS
 
-    Rel(orchestrator, llm_gateway, "routing + extraction + generation", "Python")
-    Rel(orchestrator, tool_layer, "cbr, calc, search, csv", "Python")
-    Rel(orchestrator, storage, "checkpoints R/W, user_memory CRUD", "SQLite WAL")
-
-    Rel(llm_gateway, gigachat_api, "function calling + chat completions", "HTTPS / OAuth2")
-    Rel(tool_layer, cbr_api, "GET key rate + currencies", "HTTPS")
-    Rel(tool_layer, ddg_api, "text search ru-ru", "HTTPS")
-
-    Rel(orchestrator, observability, "structured logs + metrics", "Python")
-    Rel(frontend, observability, "rate limit hits, request latency", "Python")
+    LLM <-->|"function calling\nchat completions\nHTTPS OAuth2"| GC_API
+    TOOLS <-->|"GET ставка + курсы"| CBR_API
+    TOOLS <-->|"text search ru-ru"| DDG_API
 ```
 
 ## Описание контейнеров

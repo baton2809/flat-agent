@@ -2,50 +2,53 @@
 
 Внутреннее устройство ядра агента.
 
-> Укрупнённая архитектурная схема (7 смысловых компонентов). Задача — объяснить интерфейсы между блоками, а не перечислить файлы.
+> 7 смысловых компонентов. Задача — показать интерфейсы между блоками, а не перечислить файлы.
 
 ```mermaid
-C4Component
-    title LangGraph Agent — Component Diagram (архитектурный уровень)
+flowchart TD
+    subgraph EXT["Внешние системы"]
+        direction LR
+        GC["🧠 GigaChat API"]
+        CBR_E["🏦 ЦБ РФ API"]
+        DDG_E["🔍 DuckDuckGo"]
+        DB_E[("🗄️ SQLite WAL")]
+    end
 
-    System_Ext(gigachat_api, "GigaChat API")
-    System_Ext(cbr_api, "ЦБ РФ API")
-    System_Ext(ddg_api, "DuckDuckGo")
-    ContainerDb(sqlite, "SQLite WAL", "checkpoints + user_memory")
+    subgraph AGENT["LangGraph Agent Core"]
+        direction TB
 
-    Container_Boundary(agent_core, "LangGraph Agent Core") {
+        ORCH_C["Orchestrator\ngraph.py + state.py\n─────────────────\nStateGraph · AgentState\nSqliteSaver · tenacity retry\ncircuit breakers"]
 
-        Component(orchestrator, "Orchestrator", "graph.py + state.py", "StateGraph: router→memory→[mortgage|compare|search|chat]→END.\nAgentState: {messages, route, user_id}.\nSqliteSaver checkpoints. Tenacity retry. Circuit breakers.")
+        ROUTER_C["Router\nnodes/router.py\n─────────────────\nFast-path: 20+ паттернов, 0 LLM, ~40%\nLLM-path: RouteDecision temp=0.0\nFallback: route='chat'"]
 
-        Component(router, "Router", "nodes/router.py", "Intent classification.\nFast-path: 20+ heuristics, 0 LLM, ~40% запросов.\nLLM-path: RouteDecision (function calling, temp=0.0).\nFallback: route='chat' при любой ошибке.")
+        MEM_C["Memory\nmemory.py + memory_extraction.py\n─────────────────\nExtraction: LLM → regex fallback\nStorage: SQLite UNIQUE facts\nCleanup: scheduled 24h"]
 
-        Component(memory, "Memory", "memory.py + memory_extraction.py", "Extraction: LLM-primary → regex fallback.\nStorage: SQLite user_memory (UNIQUE facts).\nRetrieval: get_memory_context() → system prompt injection.\nCleanup: scheduled 24h + keep_per_thread=5.")
+        PROC_C["Processing Nodes\nmortgage · compare · search · chat\n─────────────────\nmortgage: regex+CBR+аннуитет\ncompare/search/chat: LLM temp=0.3\nВсе: sliding window messages-10"]
 
-        Component(processing, "Processing Nodes", "nodes/mortgage|compare|search|chat.py", "mortgage: regex + CBR + аннуитетная формула (LLM не вычисляет).\ncompare: LLM (temp=0.3) + шаблонный fallback.\nsearch: DDG + relevance filter + LLM format.\nchat: CBR fast-path + memory ctx + LLM (temp=0.3).\nВсе узлы: sliding window messages[-10:].")
+        LLM_C["LLM Gateway\nllm_wrapper.py + direct_llm_call.py\n─────────────────\nFunction calling (structured output)\nPlain generation\nKeyword fallback · CB: 5/60s→30s"]
 
-        Component(llm_gateway, "LLM Gateway", "llm_wrapper.py + direct_llm_call.py", "Единая точка вызова GigaChat.\nStructured: function calling → RouteDecision/FactExtraction.\nPlain: generation (compare, search, chat).\nFallback: keyword-based ответы при недоступности.\nCircuit breaker (5 ошибок/60с → open 30с).")
+        TOOLS_C["Tool Layer\ncbr · mortgage_calc · search · csv\n─────────────────\ncbr: TTL-кэш 1ч + stale fallback\nmortgage: max 100М/30лет\nDDG: 12s + circuit breaker\ncsv: OLS + Plotly, max 10К строк"]
 
-        Component(tools, "Tool Layer", "tools/cbr|mortgage_calc|search|csv.py", "cbr_tool: TTL-кэш 1ч + stale fallback + circuit breaker.\nmortgage_calc: аннуитет + валидация (max 100М/30лет).\nsearch_tool: DDG 12с timeout + circuit breaker + relevance filter.\ncsv_analysis: OLS регрессия + выбросы + Plotly (max 10К строк).")
+        ERR_C["Error Handling\nerror_handler.py + exceptions.py\n─────────────────\nLLMError · ExternalAPIError\nValidationError\nnode_error_response → AIMessage"]
+    end
 
-        Component(error_handling, "Error Handling", "error_handler.py + exceptions.py", "Иерархия: FlatAgentError → LLMError | ExternalAPIError | ValidationError.\nnode_error_response(): exception → user-facing AIMessage.\nВсе nodes оборачивают logic в try/except → error_handler.")
-    }
+    ORCH_C -->|"entry point"| ROUTER_C
+    ORCH_C -->|"after router\n(все маршруты)"| MEM_C
+    ORCH_C -->|"dispatch по route"| PROC_C
+    ORCH_C <-->|"SqliteSaver\ncheckpoints"| DB_E
 
-    Rel(orchestrator, router, "entry point → route decision", "LangGraph node")
-    Rel(orchestrator, memory, "after router: extract + store facts", "LangGraph edge")
-    Rel(orchestrator, processing, "conditional dispatch by route", "LangGraph conditional edge")
-    Rel(orchestrator, sqlite, "checkpoints read/write", "SqliteSaver / WAL")
+    ROUTER_C -->|"RouteDecision\nfunction calling"| LLM_C
 
-    Rel(router, llm_gateway, "RouteDecision (function calling)", "structured output")
-    Rel(memory, llm_gateway, "fact extraction (plain text)", "plain generation")
-    Rel(memory, sqlite, "user_memory CRUD (thread-local)", "SQLite WAL")
+    MEM_C -->|"fact extraction\nplain text"| LLM_C
+    MEM_C <-->|"user_memory CRUD\nthread-local"| DB_E
 
-    Rel(processing, llm_gateway, "compare/search/chat generation", "plain generation")
-    Rel(processing, tools, "cbr rate, mortgage calc, DDG search, csv", "Python call")
-    Rel(processing, error_handling, "node_error_response(exc, node)", "Python")
+    PROC_C -->|"generation\ntemp=0.3"| LLM_C
+    PROC_C -->|"cbr rate · calc\nDDG · csv"| TOOLS_C
+    PROC_C -->|"при ошибке"| ERR_C
 
-    Rel(llm_gateway, gigachat_api, "function calling + chat completions", "HTTPS / OAuth2")
-    Rel(tools, cbr_api, "GET key rate + currencies", "HTTPS / TTL-cached")
-    Rel(tools, ddg_api, "text search ru-ru", "HTTPS / circuit-breaker")
+    LLM_C <-->|"function calling\nchat completions"| GC
+    TOOLS_C <-->|"GET ставка + курсы\nTTL-cached"| CBR_E
+    TOOLS_C <-->|"text search ru-ru\ncircuit-breaker"| DDG_E
 ```
 
 ## Интерфейсы между компонентами

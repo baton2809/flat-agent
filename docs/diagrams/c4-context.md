@@ -3,26 +3,27 @@
 Система, пользователь, внешние сервисы и границы.
 
 ```mermaid
-C4Context
-    title FlatAgent — System Context
+flowchart LR
+    USER["👤 Покупатель квартиры\n───────────────\nТелефон / Telegram App\nПланирует покупку недвижимости"]
 
-    Person(user, "Покупатель квартиры", "Физическое лицо, планирующее покупку недвижимости в России")
+    subgraph SYSTEM["  FlatAgent  "]
+        FA["🤖 FlatAgent\n───────────────\nAI-агент по недвижимости:\nрасчёт ипотеки · поиск\nсравнение · анализ CSV"]
+    end
 
-    System(flatagent, "FlatAgent", "AI-агент для консультаций по недвижимости: расчёт ипотеки, поиск, сравнение вариантов, анализ прайс-листов")
+    subgraph EXT["Внешние сервисы"]
+        TG["📱 Telegram\nМессенджер\nWebhook / Polling"]
+        GC["🧠 GigaChat API\nLLM от Сбер\nGIGACHAT_API_B2B"]
+        CBR["🏦 ЦБ РФ API\nКлючевая ставка\nКурсы USD/EUR/CNY"]
+        DDG["🔍 DuckDuckGo\nПоиск объявлений\nбез API-ключа"]
+    end
 
-    System_Ext(telegram, "Telegram", "Мессенджер. Канал взаимодействия с пользователем через бота")
-    System_Ext(gigachat, "GigaChat API", "LLM от Сбер. Роутинг запросов, генерация ответов, извлечение фактов (GIGACHAT_API_B2B)")
-    System_Ext(cbr, "ЦБ РФ API", "Публичный XML/HTML API. Ключевая ставка и курсы валют (USD/EUR/CNY)")
-    System_Ext(duckduckgo, "DuckDuckGo Search", "Поисковый движок. Живой поиск объявлений и новостей рынка недвижимости (без API-ключа)")
-
-    Rel(user, telegram, "Пишет сообщения, загружает CSV", "Telegram App")
-    Rel(telegram, flatagent, "Webhook / Polling", "HTTPS JSON")
-    Rel(user, flatagent, "REST API запросы", "HTTPS JSON (POST /chat)")
-
-    Rel(flatagent, gigachat, "LLM inference: роутинг, сравнение, форматирование, извлечение фактов", "HTTPS / Sber OAuth2")
-    Rel(flatagent, cbr, "GET ключевая ставка и курсы валют", "HTTPS XML/HTML")
-    Rel(flatagent, duckduckgo, "Поиск объявлений и новостей рынка", "HTTPS")
-    Rel(flatagent, telegram, "Отправка ответов пользователю", "Telegram Bot API")
+    USER -- "сообщения / CSV" --> TG
+    TG -- "webhook / polling" --> FA
+    USER -- "POST /chat" --> FA
+    FA -- "ответы пользователю" --> TG
+    FA -- "роутинг · генерация · извлечение фактов\nHTTPS / OAuth2" --> GC
+    FA -- "GET ставка + курсы\nHTTPS XML/HTML" --> CBR
+    FA -- "поиск ru-ru\nHTTPS" --> DDG
 ```
 
 ## Ключевые границы
