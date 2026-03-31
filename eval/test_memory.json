@@ -1,0 +1,72 @@
+[
+  {
+    "input": "Меня зовут Алексей",
+    "should_extract": true,
+    "expected_contains": "Алексей",
+    "method": "llm_or_regex",
+    "description": "Имя пользователя — должно быть извлечено"
+  },
+  {
+    "input": "Мой бюджет 8 млн рублей",
+    "should_extract": true,
+    "expected_contains": "8 млн",
+    "method": "llm_or_regex",
+    "description": "Бюджет — должен быть извлечён"
+  },
+  {
+    "input": "У меня жена и двое детей",
+    "should_extract": true,
+    "expected_contains": "семью",
+    "method": "llm_or_regex",
+    "description": "Семейный статус — должен быть извлечён"
+  },
+  {
+    "input": "Работаю программистом в Яндексе",
+    "should_extract": true,
+    "expected_contains": "работ",
+    "method": "llm_or_regex",
+    "description": "Место работы — должно быть извлечено"
+  },
+  {
+    "input": "Хочу купить однушку в Москве за 7 миллионов",
+    "should_extract": true,
+    "expected_contains": "7 миллион",
+    "method": "llm_or_regex",
+    "description": "Бюджет в форме «миллионов» — должен быть извлечён"
+  },
+  {
+    "input": "Расскажи про ипотеку",
+    "should_extract": false,
+    "expected_contains": null,
+    "method": "none",
+    "description": "Общий вопрос — не содержит фактов о пользователе"
+  },
+  {
+    "input": "Какой курс доллара?",
+    "should_extract": false,
+    "expected_contains": null,
+    "method": "none",
+    "description": "Вопрос о курсе — не содержит фактов о пользователе"
+  },
+  {
+    "input": "Посчитай ипотеку на 5 млн под 20%",
+    "should_extract": false,
+    "expected_contains": null,
+    "method": "none",
+    "description": "Запрос расчёта — не содержит фактов о пользователе"
+  },
+  {
+    "input": "Привет, как дела?",
+    "should_extract": false,
+    "expected_contains": null,
+    "method": "none",
+    "description": "Приветствие — не содержит фактов о пользователе"
+  },
+  {
+    "input": "Зовут меня Дмитрий, планирую взять ипотеку",
+    "should_extract": true,
+    "expected_contains": "Дмитрий",
+    "method": "llm_or_regex",
+    "description": "Имя + контекст — имя должно быть извлечено"
+  }
+]
