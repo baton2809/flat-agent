@@ -1,6 +1,7 @@
 """API routes for FlatAgent."""
 
 import asyncio
+import hashlib
 import hmac
 import logging
 import os
@@ -121,7 +122,13 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
         if not agent_graph:
             raise HTTPException(status_code=500, detail="Агент не инициализирован")
 
-        logger.info("request from user %s: %s", request.user_id, request.message[:100])
+        from agent.input_guard import validate_user_message
+        valid, reason = validate_user_message(request.message)
+        if not valid:
+            raise HTTPException(status_code=400, detail=reason)
+
+        uid_hash = hashlib.sha256(request.user_id.encode()).hexdigest()[:8]
+        logger.info("request from user %s: %s", uid_hash, request.message[:100])
 
         config = {"configurable": {"thread_id": request.user_id}}
         input_state = {
@@ -141,7 +148,7 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
             raise HTTPException(status_code=500, detail="Агент не вернул ответ")
 
         response_text = ai_messages[-1].content
-        logger.info("response for user %s: %s...", request.user_id, response_text[:100])
+        logger.info("response for user %s: %s...", uid_hash, response_text[:100])
 
         return ChatResponse(response=response_text)
 

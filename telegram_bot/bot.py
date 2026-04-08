@@ -1,10 +1,13 @@
 """Telegram bot for FlatAgent."""
 
+import hashlib
 import logging
 import asyncio
+import time
 import traceback
 import tempfile
 import os
+from collections import defaultdict, deque
 from typing import Dict, Any
 from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -16,6 +19,22 @@ from agent.memory import memory_manager
 from agent.tools.csv_analysis import analyze_csv
 
 logger = logging.getLogger(__name__)
+
+_TG_RATE_LIMIT = 20
+_TG_RATE_WINDOW = 60.0
+_user_timestamps: Dict[str, deque] = defaultdict(deque)
+
+
+def _is_user_rate_limited(user_id: str) -> bool:
+    now = time.monotonic()
+    dq = _user_timestamps[user_id]
+    while dq and now - dq[0] > _TG_RATE_WINDOW:
+        dq.popleft()
+    if len(dq) >= _TG_RATE_LIMIT:
+        return True
+    dq.append(now)
+    return False
+
 
 _s = get_settings()
 agent_graph = build_graph(str(_s.db_path))
@@ -55,8 +74,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     try:
         user_message = update.message.text
         user_id = str(update.effective_chat.id)
+        uid_hash = hashlib.sha256(user_id.encode()).hexdigest()[:8]
 
-        logger.info("message from %s: %s", user_id, user_message[:80])
+        if _is_user_rate_limited(user_id):
+            logger.warning("rate limit exceeded for user %s", uid_hash)
+            await update.message.reply_text(
+                "Слишком много сообщений. Пожалуйста, подождите немного."
+            )
+            return
+
+        from agent.input_guard import validate_user_message
+        valid, reason = validate_user_message(user_message)
+        if not valid:
+            await update.message.reply_text(reason)
+            return
+
+        logger.info("message from %s: %s", uid_hash, user_message[:80])
 
         await update.message.chat.send_action(action="typing")
 

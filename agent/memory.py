@@ -1,9 +1,11 @@
 """Long-term memory management using SQLite for thread-safe persistence."""
 
+import hashlib
 import logging
 import re
 import sqlite3
 import threading
+import time
 from typing import Optional
 from pydantic import BaseModel, Field
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -11,10 +13,13 @@ from config import get_settings, get_llm
 
 logger = logging.getLogger(__name__)
 
+_MEMORY_TTL_DAYS = 30
+
 _MEMORY_TABLE_DDL = """
 CREATE TABLE IF NOT EXISTS user_memory (
-    user_id  TEXT NOT NULL,
-    fact     TEXT NOT NULL,
+    user_id    TEXT NOT NULL,
+    fact       TEXT NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
     UNIQUE(user_id, fact)
 )
 """
@@ -68,20 +73,23 @@ class LongTermMemory:
                 (user_id, fact),
             )
             self._conn().commit()
-            logger.info("stored fact for user %s: %s", user_id, fact)
+            uid_hash = hashlib.sha256(user_id.encode()).hexdigest()[:8]
+            logger.info("stored fact for user %s: %s", uid_hash, fact)
         except sqlite3.Error as exc:
-            logger.error("failed to store fact for user %s: %s", user_id, exc)
+            uid_hash = hashlib.sha256(user_id.encode()).hexdigest()[:8]
+            logger.error("failed to store fact for user %s: %s", uid_hash, exc)
 
     def delete_user_facts(self, user_id: str) -> None:
         """Remove all stored facts for a user (called on /start or /forget)."""
+        uid_hash = hashlib.sha256(user_id.encode()).hexdigest()[:8]
         try:
             self._conn().execute(
                 "DELETE FROM user_memory WHERE user_id = ?", (user_id,)
             )
             self._conn().commit()
-            logger.info("cleared all facts for user %s", user_id)
+            logger.info("cleared all facts for user %s", uid_hash)
         except sqlite3.Error as exc:
-            logger.error("failed to clear facts for user %s: %s", user_id, exc)
+            logger.error("failed to clear facts for user %s: %s", uid_hash, exc)
 
     def get_memory_context(self, user_id: str) -> str:
         """Return formatted memory context for injection into LLM prompts."""
@@ -121,7 +129,8 @@ class LongTermMemory:
         if not user_message.strip():
             return False
 
-        logger.info("memory extraction for user %s: %.50s", user_id, user_message)
+        uid_hash = hashlib.sha256(user_id.encode()).hexdigest()[:8]
+        logger.info("memory extraction for user %s: %.50s", uid_hash, user_message)
 
         prompt = (
             "Определи, содержит ли сообщение пользователя факт, который стоит запомнить "
@@ -148,7 +157,7 @@ class LongTermMemory:
                         llm_extracted = True
                         break
         except Exception as exc:
-            logger.error("llm memory extraction failed for user %s: %s", user_id, exc)
+            logger.error("llm memory extraction failed for user %s: %s", uid_hash, exc)
 
         if llm_extracted:
             return True
@@ -187,6 +196,17 @@ class LongTermMemory:
             return f"Пользователь упомянул работу: {message[:120]}"
 
         return None
+
+    def cleanup_stale_facts(self) -> int:
+        """Delete memory facts older than _MEMORY_TTL_DAYS days."""
+        cutoff = int(time.time()) - _MEMORY_TTL_DAYS * 86400
+        cur = self._conn().execute(
+            "DELETE FROM user_memory WHERE created_at < ?", (cutoff,)
+        )
+        self._conn().commit()
+        deleted = cur.rowcount
+        logger.info("cleanup_stale_facts: removed %d expired facts", deleted)
+        return deleted
 
     def cleanup_old_checkpoints(self, keep_per_thread: int = 5) -> None:
         """Remove old LangGraph checkpoints keeping the latest N per thread.

@@ -3,6 +3,7 @@
 import asyncio
 import concurrent.futures
 import hmac
+import json
 import logging
 import time
 from collections import defaultdict
@@ -21,14 +22,40 @@ from api import router as api_router, set_agent_graph
 
 Path("logs").mkdir(exist_ok=True)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("logs/flat_agent.log"),
-        logging.StreamHandler(),
-    ],
-)
+
+class _JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        payload: dict = {
+            "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        if record.exc_info:
+            payload["exc"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False)
+
+
+def _setup_logging() -> None:
+    plain_fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    file_plain = logging.FileHandler("logs/flat_agent.log")
+    file_plain.setFormatter(plain_fmt)
+
+    file_json = logging.FileHandler("logs/flat_agent.jsonl")
+    file_json.setFormatter(_JsonFormatter())
+    file_json.setLevel(logging.WARNING)
+
+    stream = logging.StreamHandler()
+    stream.setFormatter(plain_fmt)
+
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(file_plain)
+    root.addHandler(file_json)
+    root.addHandler(stream)
+
+
+_setup_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -77,6 +104,7 @@ async def _scheduled_cleanup(interval_hours: int = 24) -> None:
         await asyncio.sleep(interval_hours * 3600)
         try:
             from agent.memory import memory_manager
+            memory_manager.cleanup_stale_facts()
             memory_manager.cleanup_old_checkpoints(keep_per_thread=5)
             logger.info("scheduled cleanup completed")
         except Exception:

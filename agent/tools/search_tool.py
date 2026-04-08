@@ -2,7 +2,9 @@
 
 import logging
 import re
+import time
 import urllib.parse
+from collections import defaultdict, deque
 from typing import List, Dict, Any, Optional
 from ddgs import DDGS
 
@@ -30,6 +32,26 @@ _LISTING_SITES = [
     ("Авито",    "https://www.avito.ru/moskva/kvartiry/prodam", ""),
     ("ДомКлик", "https://domclick.ru/search",                 ""),
 ]
+
+
+# ---------------------------------------------------------------------------
+# Per-user DDG rate limiting
+# ---------------------------------------------------------------------------
+
+_DDG_RATE_LIMIT = 10
+_DDG_RATE_WINDOW = 60.0
+_ddg_user_timestamps: dict = defaultdict(deque)
+
+
+def _ddg_user_rate_limited(user_id: str) -> bool:
+    now = time.monotonic()
+    dq = _ddg_user_timestamps[user_id]
+    while dq and now - dq[0] > _DDG_RATE_WINDOW:
+        dq.popleft()
+    if len(dq) >= _DDG_RATE_LIMIT:
+        return True
+    dq.append(now)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +117,7 @@ def _ddg_search(query: str, max_results: int, timelimit: Optional[str] = None) -
     ]
 
 
-def search_real_estate(query: str, max_results: int = 12) -> List[Dict[str, Any]]:
+def search_real_estate(query: str, max_results: int = 12, user_id: str = "") -> List[Dict[str, Any]]:
     """Perform real estate related web search with enhanced query processing.
 
     Strategy:
@@ -103,6 +125,10 @@ def search_real_estate(query: str, max_results: int = 12) -> List[Dict[str, Any]
     2. If relevance filter removes everything, relax the threshold.
     3. If DuckDuckGo returns empty, retry with time limit (cache warmup).
     """
+    if user_id and _ddg_user_rate_limited(user_id):
+        logger.warning("DDG rate limit exceeded for user")
+        raise ExternalAPIError("Превышен лимит поисковых запросов. Попробуйте позже.")
+
     # Circuit breaker: fail fast instead of waiting 12s timeout
     if ddg_cb.is_open():
         logger.warning("DDG circuit breaker OPEN — skipping search")

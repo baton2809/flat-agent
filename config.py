@@ -51,20 +51,15 @@ def get_settings() -> Settings:
     return Settings()
 
 
-_llm_instance = None
-
-
+@lru_cache(maxsize=1)
 def get_llm():
     """Return singleton LLM instance (initialised on first call)."""
-    global _llm_instance
-    if _llm_instance is None:
-        from agent.llm_wrapper import GigaChatWrapper
-        s = get_settings()
-        _llm_instance = GigaChatWrapper(
-            credentials=s.gigachat_credentials,
-            scope=s.gigachat_scope,
-            model=s.gigachat_model,
-            verify_ssl_certs=s.gigachat_verify_ssl,
-            temperature=0.7,
-        )
-    return _llm_instance
+    from agent.llm_wrapper import GigaChatWrapper
+    s = get_settings()
+    return GigaChatWrapper(
+        credentials=s.gigachat_credentials,
+        scope=s.gigachat_scope,
+        model=s.gigachat_model,
+        verify_ssl_certs=s.gigachat_verify_ssl,
+        temperature=0.7,
+    )

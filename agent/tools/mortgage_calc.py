@@ -22,8 +22,8 @@ def calculate_mortgage(amount: float, annual_rate: float, term_months: int) -> d
         raise ValueError(f"сумма кредита должна быть больше 0, получено: {amount}")
     if amount > MAX_MORTGAGE_AMOUNT:
         raise ValueError(f"сумма не может превышать {MAX_MORTGAGE_AMOUNT // 1_000_000} млн руб, получено: {amount / 1_000_000:.1f} млн")
-    if not (0 <= annual_rate <= 100):
-        raise ValueError(f"процентная ставка должна быть от 0 до 100, получено: {annual_rate}")
+    if not (0 < annual_rate <= 100):
+        raise ValueError(f"процентная ставка должна быть больше 0 и не более 100, получено: {annual_rate}")
     if term_months <= 0:
         raise ValueError(f"срок кредита должен быть больше 0 месяцев, получено: {term_months}")
     if term_months > MAX_MORTGAGE_TERM_MONTHS:
